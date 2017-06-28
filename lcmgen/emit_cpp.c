@@ -133,6 +133,7 @@ void setup_cpp_options(getopt_t *gopt)
     getopt_add_string (gopt, 0, "cpp-std",    "c++98",      "C++ standard(c++98, c++11)");
     getopt_add_string (gopt, 0, "cpp-hpath",    ".",      "Location for .hpp files");
     getopt_add_string (gopt, 0, "cpp-include",   "",       "Generated #include lines reference this folder");
+    getopt_add_string (gopt, 0, "cpp-typeinfo",   "",       "Generate typeinfo functions for each type");
 }
 
 static void emit_auto_generated_warning(FILE *f)
@@ -188,6 +189,97 @@ emit_package_namespace_close(lcmgen_t* lcmgen, FILE* f, lcm_struct_t* ls)
         emit(0, "}\n");
     }
     g_strfreev(namespaces);
+}
+
+static void emit_cpp_num_fields(lcmgen_t *lcm, FILE *f, lcm_struct_t *ls)
+{
+  const char *sn  = ls->structname->shortname;
+    emit(0,"int %s::num_fields()", sn);
+    emit(0,"{");
+    emit(1, "return %d;", g_ptr_array_size(ls->members));
+    emit(0,"}");
+    emit(0,"");
+}
+
+static void emit_cpp_struct_size(lcmgen_t *lcm, FILE *f, lcm_struct_t *ls)
+{
+  const char *sn  = ls->structname->shortname;
+    emit(0,"size_t %s::struct_size()", sn);
+    emit(0,"{");
+    emit(1, "return sizeof(%s);", sn);
+    emit(0,"}");
+    emit(0,"");
+}
+
+static inline char *str_toupper(char *s)
+{
+    for(char *p = s; *p; p++)
+        *p = toupper(*p);
+    return s;
+}
+
+static void emit_cpp_get_field(lcmgen_t *lcm, FILE *f, lcm_struct_t *ls)
+{
+  const char *sn  = ls->structname->shortname;
+
+    emit(0,"int %s::get_field(int i, lcm_field_t *f)", sn);
+    emit(0,"{");
+    emit(1,"if (0 > i || i >= num_fields())");
+    emit(2,"return 1;");
+    emit(1,"");
+
+    emit(1,"switch (i) {");
+    emit(1,"");
+
+    int num_fields = g_ptr_array_size(ls->members);
+    for(int i = 0; i < num_fields; i++) {
+        emit(2,"case %d: {", i);
+
+        lcm_member_t *m = (lcm_member_t *)g_ptr_array_index(ls->members, i);
+
+        const char *type_val = NULL;
+        if(lcm_is_primitive_type(m->type->shortname)) {
+            type_val = str_toupper(g_strdup_printf("LCM_FIELD_%s", m->type->shortname));
+        } else {
+            emit(3,"/* %s */", m->type->shortname);
+            type_val = "LCM_FIELD_USER_TYPE";
+        }
+
+        emit(3,"f->name = \"%s\";", m->membername);
+        emit(3,"f->type = %s;", type_val);
+        emit(3,"f->typestr = \"%s\";", m->type->shortname);
+
+        int num_dim = g_ptr_array_size(m->dimensions);
+        emit(3,"f->num_dim = %d;", num_dim);
+
+        if(num_dim != 0) {
+
+            for(int j = 0; j < num_dim; j++) {
+                lcm_dimension_t *d = (lcm_dimension_t*) g_ptr_array_index(m->dimensions, j);
+                if(d->mode == LCM_VAR)
+                    emit(3,"f->dim_size[%d] = p->%s;", j, d->size);
+                else
+                    emit(3,"f->dim_size[%d] = %s;", j, d->size);
+            }
+
+            for(int j = 0; j < num_dim; j++) {
+                lcm_dimension_t *d = (lcm_dimension_t*) g_ptr_array_index(m->dimensions, j);
+                emit(3,"f->dim_is_variable[%d] = %d;", j, d->mode == LCM_VAR);
+            }
+
+        }
+
+        emit(3, "f->data = (void *) &%s;", m->membername);
+
+        emit(3, "return 0;");
+        emit(2,"}");
+        emit(2,"");
+    }
+    emit(2,"default:");
+    emit(3,"return 1;");
+    emit(1,"}");
+    emit(0,"}");
+    emit(0,"");
 }
 
 /** Emit header file **/
@@ -364,6 +456,28 @@ static void emit_header_start(lcmgen_t *lcmgen, FILE *f, lcm_struct_t *ls)
     emit(2, " * Returns \"%s\"", ls->structname->shortname);
     emit(2, " */");
     emit(2, "inline static const char* getTypeName();");
+
+//    if(getopt_get_bool(lcmgen->gopt, "cpp-typeinfo")) {
+
+        emit(2, "/**");
+        emit(2, " * Get the number of bytes in a \"%s\"", ls->structname->shortname);
+        emit(2, " */");
+        emit(2,"inline static size_t struct_size();");
+
+        emit(2, "/**");
+        emit(2, " * Get the number of fields in a \"%s\"", ls->structname->shortname);
+        emit(2, " */");
+        emit(2,"inline static int  num_fields();");
+
+        emit(2, "/**");
+        emit(2, " * Get info about a field.");
+        emit(2, " * @param i Index of the field to query.");
+        emit(2, " * @param f lcm_field_t to populate with field info");
+        emit(2, " * @return 0 if f was succesfully populated. Nonzero otherwise");
+        emit(2, " */");
+        emit(2,"inline int  get_field(int i, lcm_field_t *f);");
+        //emit(2,"const lcm_type_info_t *get_type_info();");
+//    }
 
     emit(0, "");
     emit(2, "// LCM support functions. Users should not call these");
@@ -785,6 +899,12 @@ int emit_cpp(lcmgen_t *lcmgen)
             emit_decode_nohash(lcmgen, f, lr);
             emit_encoded_size_nohash(lcmgen, f, lr);
             emit_compute_hash(lcmgen, f, lr);
+//            if(getopt_get_bool(lcmgen->gopt, "cpp-typeinfo") || 1) {
+              emit_cpp_struct_size(lcmgen, f, lr);
+              emit_cpp_num_fields(lcmgen, f, lr);
+              emit_cpp_get_field(lcmgen, f, lr);
+              //emit_c_get_type_info(lcmgen, f, lr);
+//            }
 
             emit_package_namespace_close(lcmgen, f, lr);
             emit(0, "#endif");
